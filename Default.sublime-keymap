@@ -1,0 +1,13 @@
+[
+  { "keys": [ "primary+r" ], "command": "yaml_nav_goto", "context":
+    [
+      { "key": "selector", "operator": "equal", "operand": "source.yaml - source.yaml.sublime" }
+    ]
+  },
+
+  { "keys": [ "primary+shift+w" ], "command": "yaml_nav_copy_current", "context":
+    [
+      { "key": "selector", "operator": "equal", "operand": "source.yaml" }
+    ]
+  }
+]

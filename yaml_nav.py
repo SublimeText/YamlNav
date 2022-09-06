@@ -5,229 +5,197 @@ Main plugin module with sublime commands and listeners.
 import sublime
 import sublime_plugin
 import re
-import time
+from functools import partial
+from typing import (
+    Any,
+    List,
+    Mapping,
+    Optional,
+)
 
-try:
-    from . import yaml_math, view_data, worker, utils
-except:
-    # ST2
-    import yaml_math
-    import view_data
-    import worker
-    import utils
+from .lib import yaml_math
 
 
 # Status key for sublime status bar
 STATUS_BAR_ID = "yaml_nav"
 
 # Filename with plugin settings
-SETTINGS_FILE = "YAML Nav.sublime-settings"
+SETTINGS_FILE = "YamlNav.sublime-settings"
 
-# Delay in seconds after which symbols will be updated on buffer modification
-UPDATE_SYMBOLS_DELAY = 0.4
+# Delay in milliseconds after which symbols will be updated on buffer modification
+UPDATE_SYMBOLS_DEBOUNCE = 400
+
+REMOVE_COLON_RE = re.compile(r"((?<=(^)):|((?<=(\.)):))")
 
 
-def set_status(view, message):
+def set_status(view, message: Optional[str] = None):
+    """Display message in a status bar field for the given view.
     """
-    Displays given message in the status bar of given view.
-    """
-
     if message:
-        utils.execute_in_sublime_main_thread(
-            lambda: view.set_status(STATUS_BAR_ID, "YAML path: %s" % message))
+        view.set_status(STATUS_BAR_ID, "YAML path: %s" % message)
     else:
-        utils.execute_in_sublime_main_thread(
-            lambda: view.erase_status(STATUS_BAR_ID))
+        view.erase_status(STATUS_BAR_ID)
 
 
 def is_yaml_view(view):
+    """Check if the given view contains YAML code.
     """
-    Returns true if given view contains YAML code.
-    """
-
     return view.score_selector(0, "source.yaml") > 0
 
 
-def get_setting(key):
-    """
-    Returns setting value with given key.
-    """
-
-    return sublime.load_settings(SETTINGS_FILE).get(key)
+def get_setting(key, default=None):
+    return sublime.load_settings(SETTINGS_FILE).get(key, default)
 
 
-class YamlNavListener(sublime_plugin.EventListener):
-    """
-    Listens for file modification/cursor movement and updates list of
-    YAML symbols and currently selected symbol.
+class YamlNavListener(sublime_plugin.ViewEventListener):
+    """Listen for file modification/cursor movement and maintain symbols for the view.
     """
 
-    # Regexp to remove leading colon in symbol paths
-    REMOVE_COLON_RE = re.compile(r"((?<=(^)):|((?<=(\.)):))")
+    current_yaml_symbol = None
+    symbols_update_scheduled = False
+    yaml_symbols: List[yaml_math.Symbol] = []
+    last_change_count: Optional[int] = None
 
-    def on_load(self, view):
-        if is_yaml_view(view):
-            # Force our custom syntax
-            view.set_syntax_file("Packages/YAML Nav/YAML-ng.sublime-syntax")
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        print('yamlnav __init__', self.view.file_name(), self.view.id())
 
-            # Build list after file load
-            self.update_yaml_symbols(view)
+    @classmethod
+    def is_applicable(cls, settings: Mapping[str, Any]):
+        # A scope-selector-based approach would be nicer, but we don't get that here.
+        return 'YAML' in settings.get('syntax', '')
 
-    on_new = on_load
+    def on_load_async(self) -> None:
+        self._update_yaml_symbols()
 
-    def on_activated(self, view):
-        if is_yaml_view(view):
-            if not view.is_loading() and not view_data.get(view, "yaml_symbols"):
-                # Rebuild list after plugin reload
-                self.update_yaml_symbols(view)
-
+    def on_activated_async(self) -> None:
+        print('yamlnav on_activated')
+        if self.view.is_loading():
+            return
+        if self.yaml_symbols:
             # Update current symbol after view change/quick navigation
-            self.update_current_yaml_symbol(view)
-
-    def on_modified(self, view):
-        if is_yaml_view(view):
-            # Save modification time to throttle symbols update
-            view_data.set(view, "modified_at", time.time())
-
-            # Rebuild list after file modification
-            self.update_yaml_symbols(view)
-
-    def on_selection_modified(self, view):
-        if is_yaml_view(view):
-            # Update current symbol after cursor movement
-            self.update_current_yaml_symbol(view)
-
-    def on_close(self, view):
-        # Clear list after view close
-        self.clear_yaml_symbols(view)
-
-    def update_yaml_symbols(self, view):
-        """
-        Generates YAML symbol list and saves it in the view data.
-        """
-
-        def do_update():
-            """
-            Do actual symbols update in separate thread.
-            """
-
-            # Extract symbols
-            symbols = yaml_math.get_yaml_symbols(view)
-
-            # Remove leading colons when setting trim_leading_colon = true
-            if get_setting("trim_leading_colon"):
-                for symbol in symbols:
-                    symbol["name"] = self.REMOVE_COLON_RE.sub("", symbol["name"])
-
-            # Save symbols
-            view_data.set(view, "yaml_symbols", symbols)
-
-            # Also update current symbol because it may have changed
-            self.update_current_yaml_symbol(view)
-
-        def schedule_update():
-            """
-            Schedules symbols update.
-            """
-
-            modified_at = view_data.get(view, "modified_at")
-
-            # Update symbols if last modification was more than UPDATE_SYMBOLS_DELAY ms. ago,
-            # otherwise reschedule update
-            if not modified_at or time.time() - modified_at > UPDATE_SYMBOLS_DELAY:
-                view_data.set(view, "symbols_update_scheduled", False)
-                worker.execute(do_update)
-            else:
-                view_data.set(view, "symbols_update_scheduled", True)
-                sublime.set_timeout(schedule_update, int(UPDATE_SYMBOLS_DELAY * 1000))
-
-        # Schedule update unless it already scheduled
-        if not view_data.get(view, "symbols_update_scheduled"):
-            view_data.set(view, "symbols_update_scheduled", True)
-            sublime.set_timeout(schedule_update, int(UPDATE_SYMBOLS_DELAY * 1000))
-
-    def update_current_yaml_symbol(self, view):
-        """
-        Calculates current selected YAML symbol and saves it in the view data.
-        """
-
-        all_symbols = view_data.get(view, "yaml_symbols")
-        current_yaml_symbol = yaml_math.get_selected_yaml_symbol(all_symbols, view)
-
-        view_data.set(view, "current_yaml_symbol", current_yaml_symbol)
-
-        if current_yaml_symbol:
-            set_status(view, current_yaml_symbol["name"])
+            self._update_current_yaml_symbol()
         else:
-            set_status(view, None)
+            # Rebuild list after plugin reload
+            self._update_yaml_symbols()
 
-    def clear_yaml_symbols(self, view):
+    def on_modified_async(self) -> None:
+        self._debounce_update_yaml_symbols()
+
+    def on_selection_modified_async(self) -> None:
+        self._update_current_yaml_symbol()
+
+    def on_close(self) -> None:
+        print('yamlnav on_close', self.view.file_name(), self.view.id())  # TODO remove after checking
+
+    def __del__(self):
+        print('yamlnav __del__', self.view.file_name(), self.view.id())  # TODO remove after checking
+
+    def _debounce_update_yaml_symbols(self) -> None:
+        print('yamlnav debounce', self.view.change_count())
+        callback = partial(self._update_yaml_symbols, change_count=self.view.change_count())
+        sublime.set_timeout_async(callback, UPDATE_SYMBOLS_DEBOUNCE)
+
+    def _update_yaml_symbols(self, change_count: Optional[int] = None) -> None:
+        """Generate YAML symbol list and saves it in the view data.
         """
-        Clears the view data.
+        print('yamlnav _update_yaml_symbols')
+        if change_count is not None and change_count != self.view.change_count():
+            return
+
+        # Extract symbols
+        symbols = yaml_math.get_yaml_symbols(self.view)
+        print('yamlnav symbols', symbols)
+
+        # TODO what's this do
+        # Remove leading colons when setting trim_leading_colon = true
+        # if get_setting("trim_leading_colon"):
+        #     for symbol in symbols:
+        #         symbol["name"] = REMOVE_COLON_RE.sub("", symbol["name"])
+
+        self.yaml_symbols = symbols
+
+        # Also update current symbol because it may have changed
+        self._update_current_yaml_symbol()
+
+    def _update_current_yaml_symbol(self) -> None:
+        """Find the currently selected YAML symbol (for display and copying).
         """
+        self.current_yaml_symbol = yaml_math.get_selected_yaml_symbol(self.yaml_symbols, self.view)
+        if self.current_yaml_symbol:
+            set_status(self.view, self.current_yaml_symbol.name)
+        else:
+            set_status(self.view)
 
-        view_data.clear(view)
+    # TODO write custom context key that checks whether the current file has symbols
 
 
-class GotoYamlSymbolCommand(sublime_plugin.TextCommand):
+class YamlNavGotoCommand(sublime_plugin.TextCommand):
+    """Open a quick panel with YAML symbols.
     """
-    Opens quick panel with YAML symbols.
-    """
+    _listener: Optional[YamlNavListener]
 
-    def run(self, edit):
-        symbols = view_data.get(self.view, "yaml_symbols") or []
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._listener = sublime_plugin.find_view_event_listener(self.view, YamlNavListener)
 
-        def on_symbol_selected(index):
-            if index >= 0:
-                region = symbols[index]["region"]
+    def is_enabled(self) -> bool:
+        return bool(self._listener)
 
-                self.view.show_at_center(region)
-
-                # Set cursor after YAML key
-                self.view.sel().clear()
-                self.view.sel().add(sublime.Region(region.end() + 1))
-
+    def run(self, edit: sublime.Edit) -> None:
+        # TODO use a list input handler & live-update viewport
+        if not self._listener:
+            return
+        if not (symbols := self._listener.yaml_symbols):
+            self.view.window().status_message("No symbols found")
+            return
         self.view.window().show_quick_panel(
-            list(map(lambda x: x["name"], symbols)), on_symbol_selected)
+            [x.name for x in symbols],
+            self._on_symbol_selected,
+        )
 
-    def is_enabled(self):
-        return is_yaml_view(self.view)
+    def _on_symbol_selected(self, index: int) -> None:
+        if index == -1 or not self._listener:
+            return
+        region = self._listener.yaml_symbols[index].region
+
+        self.view.show_at_center(region)
+
+        # TODO extract to TextCommand because of selection modification
+        # Set cursor after YAML key
+        self.view.sel().clear()
+        self.view.sel().add(sublime.Region(region.end() + 1))
 
 
-class CopyYamlSymbolToClipboardCommand(sublime_plugin.TextCommand):
-    def __init__(self, *args):
-        sublime_plugin.TextCommand.__init__(self, *args)
+class YamlNavCopyCurrentCommand(sublime_plugin.TextCommand):
+    """Copy selected YAML symbol into clipboard.
+    """
+    _listener: Optional[YamlNavListener]
 
-        # Load settings
-        self.detect_locale_filename_re = re.compile(get_setting("detect_locale_filename_re"), re.I)
-        self.trim_language_tag_on_copy_from_locales = get_setting("trim_language_tag_on_copy_from_locales")
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._listener = sublime_plugin.find_view_event_listener(self.view, YamlNavListener)
 
-    def run(self, edit):
-        """
-        Copies selected YAML symbol into clipboard.
-        """
+    def is_enabled(self) -> bool:
+        return bool(self._listener)
 
-        current_symbol = view_data.get(self.view, "current_yaml_symbol")
-
-        if current_symbol:
-            current_symbol_name = current_symbol["name"]
+    def run(self, edit: sublime.Edit) -> None:
+        if self._listener and (current_symbol := self._listener.current_yaml_symbol):
+            current_symbol_name = current_symbol.name
 
             # Automatically detect localization YAML and trim first tag
             # (if enabled in settings)
-            if self.trim_language_tag_on_copy_from_locales and self.is_locale_file():
-                current_symbol_name = re.sub("^(.+?)\\.", "", current_symbol_name)
+            if get_setting("trim_language_tag_on_copy_from_locales") and self._is_locale_file():
+                current_symbol_name = re.sub(r"^(.+?)\.", "", current_symbol_name)
 
             sublime.set_clipboard(current_symbol_name)
-            set_status(self.view, "%s - copied to clipboard!" % current_symbol_name)
+            set_status(self.view, f"{current_symbol_name} - copied to clipboard!")
         else:
             set_status(self.view, "nothing selected - can't copy!")
 
-    def is_enabled(self):
-        return is_yaml_view(self.view)
-
-    def is_locale_file(self):
-        """
-        Returns true if current file is localization file.
-        """
-
-        return self.detect_locale_filename_re.search(self.view.file_name()) is not None
+    def _is_locale_file(self) -> bool:
+        return bool(re.search(
+            get_setting("detect_locale_filename_re"),
+            self.view.file_name() or "",
+            re.I,
+        ))
