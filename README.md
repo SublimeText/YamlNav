@@ -1,21 +1,15 @@
 # YAML Nav
 
-Sublime Text 2/3 plugin for quick navigation in YAML files.
+Sublime Text plugin for quick navigation in YAML files.
 
 ![screenshot](screenshot.png)
 
 ## Installation
 
-### With Package Control
+### Manual
 
-See http://wbond.net/sublime_packages/package_control/installation for instructions.
-
-Open the palette (Control+Shift+P or Command+Shift+P) in Sublime Text and select Package Control: Install Package and then select "YAML Nav" from the list.
-
-### Manually
-
- * cd <YOUR PACKAGES DIRECTORY> (eg. ~/Library/Application\ Support/Sublime\ Text\ 3/Packages)
- * git clone http://github.com/ddiachkov/sublime-yaml-nav
+ * cd <YOUR PACKAGES DIRECTORY> (eg. ~/Library/Application\ Support/Sublime\ Text/Packages)
+ * git clone http://github.com/SublimeText/YamlNav
 
 ## Key bindings
 
